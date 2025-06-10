@@ -43,17 +43,34 @@
       <string>Path Planning</string>
      </property>
      <layout class="QFormLayout" name="formLayout_2">
-      <item row="1" column="0">
+      <item row="0" column="0">
+       <widget class="QLabel" name="jsonpc">
+        <property name="text">
+         <string>Point Cloud Json Path:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="ctkPathLineEdit" name="jsonpath"/>
+      </item>
+      <item row="2" column="0">
        <widget class="QLabel" name="downsample">
         <property name="text">
          <string>Downsample percentage:</string>
         </property>
        </widget>
       </item>
-      <item row="1" column="1">
+      <item row="2" column="1">
        <widget class="QSpinBox" name="downsamplevalue"/>
       </item>
-      <item row="2" column="1">
+      <item row="3" column="1">
+       <widget class="QPushButton" name="loadpc">
+        <property name="text">
+         <string>Load Point Cloud</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
        <widget class="QPushButton" name="applytspbutton">
         <property name="text">
          <string>Calculate Optimal Path</string>
@@ -76,33 +93,45 @@
         </property>
        </widget>
       </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="ctkCollapsibleButton" name="moveitcollapsebutton">
-     <property name="maximumSize">
-      <size>
-       <width>16777215</width>
-       <height>16777215</height>
-      </size>
-     </property>
-     <property name="text">
-      <string>Trajectory Planning</string>
-     </property>
-     <property name="collapsed">
-      <bool>false</bool>
-     </property>
-     <layout class="QFormLayout" name="formLayout_3">
       <item row="0" column="0">
-       <widget class="QLabel" name="label_3">
+       <widget class="QLabel" name="perturb">
         <property name="text">
-         <string>Pertubation Value:</string>
+         <string>Perturbation Value:</string>
         </property>
        </widget>
       </item>
       <item row="0" column="1">
-       <widget class="QSpinBox" name="spinBox"/>
+       <widget class="ctkDoubleSpinBox" name="perturbval">
+        <property name="singleStep">
+         <double>0.050000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.010000000000000</double>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="moveitcollapsebutton_2">
+     <property name="text">
+      <string>Trajectory Planning MoveIt</string>
+     </property>
+     <layout class="QFormLayout" name="formLayout_5">
+      <item row="0" column="0">
+       <widget class="QPushButton" name="Planbutton">
+        <property name="text">
+         <string>Plan</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QPushButton" name="executebutton">
+        <property name="text">
+         <string>Execute</string>
+        </property>
+       </widget>
       </item>
      </layout>
     </widget>
@@ -141,6 +170,11 @@
    <extends>QWidget</extends>
    <header>ctkCollapsibleButton.h</header>
    <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>ctkDoubleSpinBox</class>
+   <extends>QWidget</extends>
+   <header>ctkDoubleSpinBox.h</header>
   </customwidget>
   <customwidget>
    <class>ctkPathLineEdit</class>

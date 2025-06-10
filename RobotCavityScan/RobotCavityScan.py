@@ -2,10 +2,6 @@ import logging
 import os
 from typing import Annotated, Optional
 import numpy as np
-from ikpy.chain import Chain
-from ikpy.link import URDFLink
-from scipy.optimize import minimize, Bounds
-from spatialmath import SE3
 
 import vtk
 
@@ -32,6 +28,37 @@ try:
 except ModuleNotFoundError:
     slicer.util.pip_install("spatialmath-python")
     from spatialmath import SE3
+
+# NetworkX
+try:
+    import networkx as nx
+except ModuleNotFoundError:
+    slicer.util.pip_install("networkx")
+    import networkx as nx
+    
+# ikpy
+try:
+    from ikpy.chain import Chain
+    from ikpy.link import URDFLink
+except ModuleNotFoundError:
+    slicer.util.pip_install("ikpy")
+    from ikpy.chain import Chain
+    from ikpy.link import URDFLink
+    
+# json
+try:
+    import json
+except ModuleNotFoundError:
+    slicer.util.pip_install("json")
+    import json
+    
+# time
+try:
+    import time
+except ModuleNotFoundError:
+    slicer.util.pip_install("time")
+    import time
+    
 
 
 from slicer import vtkMRMLScalarVolumeNode
@@ -162,6 +189,17 @@ class RobotCavityScanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.logic = None
         self._parameterNode = None
         self._parameterNodeGuiTag = None
+        self.downsampled_points = None
+        self.optimalidx = None
+        self.optialdistance = None
+        self.bestpath = None
+        self.bestcost = None
+        
+        # Create ROS2 publisher to send optimal joint angles to /optangles topic
+        rosLogic = slicer.util.getModuleLogic('ROS2')
+        rosNode = rosLogic.GetDefaultROS2Node()
+        pub = rosNode.CreateAndAddPublisherNode('DoubleArray', '/optangles')
+        self.pub = pub
 
     def setup(self) -> None:
         """Called when the user opens the module the first time and the widget is initialized."""
@@ -192,7 +230,11 @@ class RobotCavityScanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Buttons
         self.ui.applyButton.connect("clicked(bool)", self.onApplyButton)
         self.ui.applytspbutton.connect("clicked(bool)", self.onapplytspbutton)
-        self.ui.LoadURDFbutton.connect("clicked(bool)", self.LoadURDFbutton)  
+        self.ui.LoadURDFbutton.connect("clicked(bool)", self.LoadURDFbutton)
+        self.ui.Planbutton.connect("clicked(bool)", self.onPlanButton)
+        self.ui.executebutton.connect("clicked(bool)", self.onExecuteButton)  
+        self.ui.loadpc.connect("clicked(bool)", self.onloadpcbutton)
+        self.ui.ikbutton.connect("clicked(bool)", self.onikbutton)  
 
         # Make sure parameter node is initialized (needed for module reload)
         self.initializeParameterNode()
@@ -276,22 +318,135 @@ class RobotCavityScanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.logic.process(self.ui.inputSelector.currentNode(), self.ui.invertedOutputSelector.currentNode(),
                                    self.ui.imageThresholdSliderWidget.value, not self.ui.invertOutputCheckBox.checked, showResult=False)
                                    
-                                   
-    def onapplytspbutton(self) -> None:
-        value = self.ui.downsamplevalue.value
-        print(f"Downsample value is: {value}")
-        slicer.util.infoDisplay(f"Downsample value is: {value}")
-
     def LoadURDFbutton(self) -> None:
         urdf_filepath = self.ui.urdfPathLineEdit.currentPath
-        self.logic.load_urdf_file(urdf_filepath)
+        
+        if not urdf_filepath:
+            slicer.util.errorDisplay(_("Please select a URDF file to load."))
+        else:
+            self.logic.load_urdf_file(urdf_filepath)
+            
+    def onloadpcbutton(self) -> None:
+        # Get downsample value
+        value = self.ui.downsamplevalue.value
+        # Get points from JSON file
+        json_filepath = self.ui.jsonpath.currentPath
+        # Check if JSON file is selected
+        if not json_filepath:
+            slicer.util.errorDisplay(_("Please select a JSON file with points."))
+            return
+        # Read in points from JSON file
+        points, markupsNode = self.logic.read_json(json_filepath)
+        # Downsample pointcloud by value ratio
+        downsample, indices = self.logic.downsample_points(points,value/100)
+        
+        # Step 4: Create a new markups node to show the downsampled points
+        downsampledNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "DownsampledPoints")
+        slicer.util.updateMarkupsControlPointsFromArray(downsampledNode, downsample)
+
+        # After creating the new node and adding downsampled points
+        original_display = markupsNode.GetDisplayNode()
+        new_display = downsampledNode.GetDisplayNode()
+        new_display.CopyContent(original_display)
+        new_display.PointLabelsVisibilityOff()
+        original_display.SetVisibility(False)  # Hide original markups
+
+        self.downsampled_points = downsample
+    
+    def onapplytspbutton(self) -> None:
+        if self.downsampled_points is None:
+            slicer.util.errorDisplay("❌ Please load a point cloud first.")
+            return
+
+        initial_path = list(range(len(self.downsampled_points)))
+        initial_distance = self.logic.calculate_total_distance(self.downsampled_points, initial_path)
+        optimized_path_indices, optimized_distance = self.logic.two_opt(self.downsampled_points, initial_path)
+
+        slicer.util.infoDisplay(
+            f"Path optimized from {initial_distance:.2f} to {optimized_distance:.2f} (no return)."
+        )
+
+        self.optimalidx = optimized_path_indices
+        self.optialdistance = optimized_distance
+
+        # Remove existing path node if it exists
+        existing_path = slicer.mrmlScene.GetFirstNodeByName("TSP_CurvePath")
+        if existing_path:
+            slicer.mrmlScene.RemoveNode(existing_path)
+
+        # Create a curve node for the path
+        curveNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsCurveNode", "TSP_CurvePath")
+        displayNode = curveNode.GetDisplayNode()
+        displayNode.SetVisibility3D(True)
+        displayNode.SetVisibility2D(False)
+        displayNode.SetLineThickness(2.0)
+        displayNode.SetSelectedColor(1.0, 0.0, 0.0)  # Optional: green path
+
+        # Add the optimized points to the curve node
+        for idx in optimized_path_indices:
+            pt = self.downsampled_points[idx]
+            curveNode.AddControlPointWorld(pt)
+
+
+    def onikbutton(self) -> None:
+        # Get perturbation value
+        eps = self.ui.perturbval.value
+        # Grab all movable joints
+        idx = self.logic.get_movable_indices()
+        # Build a full 4×4 target frame for first target point
+        pos = self.downsampled_points[self.optimalidx[0]]
+        T = self.logic.build_target_frame(pos)
+        # Set home position as intial guess
+        initialpos = [0.0] * (len(self.logic.chain.links))
+        # Calculate IK solution for first target
+        res,p_target,R_target = self.logic.solve_ik_bfgs(T,initialpos)
+        if not res.success:
+            slicer.util.errorDisplay(_("First IK solution did not converge."))
+        else:
+            # Save initial solution
+            q_solinit = res.x
+            
+            # Set the weights jused for edge cost calculation, THIS SHOULD BE USER DEFINED
+            weights = np.ones(len(self.logic.chain.links))
+
+            # Build graph
+            G = self.logic.create_graph(q_solinit, initialpos, self.downsampled_points, weights, idx, eps)
+
+            # Find shortest path
+            best_path, best_cost = self.logic.get_shortest_path(G)
+            
+            slicer.util.infoDisplay("Best path cost: {:.2f}".format(best_cost))
+
+            # Convert list to numpy array
+            best_path = np.array(best_path)
+            
+            # Save values to logic attributes for later use
+            self.bestpath = best_path
+            self.bestcost = best_cost
+    
+            # Flatten the best path to a 1D array
+            flat_data = best_path.flatten()
+
+            # Create blank message and set values
+            msg = self.pub.GetBlankMessage()
+            msg.SetNumberOfTuples(len(flat_data))
+            for i, val in enumerate(flat_data):
+                msg.SetValue(i, val)
+
+            self.pub.Publish(msg)
+
+        
+    def onPlanButton(self) -> None:
+        slicer.util.infoDisplay("Robot execution logic is not implemented yet.")
+
+    def onExecuteButton(self) -> None:
+        slicer.util.infoDisplay("Robot execution logic is not implemented yet.")
     	
     	
 
 #
 # RobotCavityScanLogic
 #
-
 
 class RobotCavityScanLogic(ScriptedLoadableModuleLogic):
     """This class should implement all the actual
@@ -306,7 +461,7 @@ class RobotCavityScanLogic(ScriptedLoadableModuleLogic):
     def __init__(self) -> None:
         """Called when the logic class is instantiated. Can be used for initializing member variables."""
         ScriptedLoadableModuleLogic.__init__(self)
-        
+        self.chain = None
         
     def load_urdf_file(self, urdf_path: str):
 
@@ -318,8 +473,43 @@ class RobotCavityScanLogic(ScriptedLoadableModuleLogic):
             slicer.util.infoDisplay("✅ URDF file loaded successfully.")
         except Exception as e:
             raise RuntimeError(f"Failed to load URDF: {e}")
+        
+    def load_markups_node(self, filepath: str):
+        [success, node] = slicer.util.loadMarkups(filepath, returnNode=True)
+        if not success:
+            raise RuntimeError(f"❌ Failed to load markups from: {filepath}")
+        return node
+
+    def get_control_points_as_array(self, markups_node):
+        return slicer.util.arrayFromMarkupsControlPoints(markups_node)
 
 
+    def read_json(self, json_path, tf=None):
+        if tf is None:
+            tf = np.eye(4)
+
+        # Load markups node
+        markupsNode = slicer.util.loadMarkups(json_path)
+
+        # Extract control points as a NumPy array
+        positions = slicer.util.arrayFromMarkupsControlPoints(markupsNode)
+
+        positions_tf = np.zeros_like(positions)
+
+        for i in range(len(positions)):
+            pos_h = np.append(positions[i], 1)  
+            pos_h = tf @ pos_h
+            positions_tf[i] = pos_h[:3]
+
+        return positions_tf, markupsNode
+    
+    def get_movable_indices(self):
+        if self.chain is None:
+            slicer.util.errorDisplay("❌ URDF not loaded. Please load the URDF file first.")
+            return []
+        return [i for i, link in enumerate(self.chain.links) if link.joint_type in ['revolute', 'prismatic']]
+
+    
     def calculate_total_distance(self, points, path):
         """Compute total Euclidean distance along a given index path."""
         distance = 0.0
@@ -353,7 +543,7 @@ class RobotCavityScanLogic(ScriptedLoadableModuleLogic):
         """Randomly downsample and scale a point cloud."""
         n_keep = int(len(points) * downsample_ratio)
         indices = np.random.choice(len(points), n_keep, replace=False)
-        downsampled = points[indices] / 1000.0  # convert mm→m if needed
+        downsampled = points[indices]
         print(f"Downsampled from {len(points)} to {len(downsampled)} points")
         return downsampled, indices
 
@@ -380,17 +570,22 @@ class RobotCavityScanLogic(ScriptedLoadableModuleLogic):
         # 2) initial guess
         q0 = initialpos
 
-        # 3) joint limits → Bounds
-        # robot.qlim is shape (2, n): [lowers; uppers]
-        lb = [joint.bounds[0] if joint.bounds else -np.pi for joint in self.chain.links[1:]]
-        ub = [joint.bounds[1] if joint.bounds else np.pi for joint in self.chain.links[1:]]
-        bounds = Bounds(lb, ub)
+        full_bounds = [
+            link.bounds if link.bounds is not None else (-np.pi, np.pi)
+            for link in self.chain.links
+        ]
+
+        # 2) Split into lower/upper arrays
+        lower_full, upper_full = zip(*full_bounds)
+
+        # 4) Build your Bounds object
+        bounds = Bounds(lower_full, upper_full)
 
         # 4) cost function: pos‖dp‖² + rot‖dR‖²
         def cost(q):
-            Tsol = self.robot.fkine(q)
-            dp   = Tsol.t - p_target
-            dR   = Tsol.R - R_target
+            Tsol = self.chain.forward_kinematics(q)
+            dp   = Tsol[:3, 3] - p_target
+            dR   = Tsol[:3, :3] - R_target
             return dp.dot(dp) + np.linalg.norm(dR, ord='fro')**2
 
         # 5) call SciPy minimize
@@ -407,7 +602,7 @@ class RobotCavityScanLogic(ScriptedLoadableModuleLogic):
         """From IKPy’s full-chain solution (one value per link), drop the 0th element (the origin dummy) and then keep only the revolute joint angles."""
         # drop index 0
         sol = full_solution[1:]
-        links = self.robot.links[1:]
+        links = self.chain.links[1:]
         # filter on actual joint axes
         return [
             angle
@@ -415,9 +610,149 @@ class RobotCavityScanLogic(ScriptedLoadableModuleLogic):
             if getattr(link, "axis", None) is not None
         ]
     
-    def perturb(self, q, eps=0.05, n=3):
-        """Generate n random perturbations around q within ±eps."""
-        return [q + np.random.uniform(-eps, eps, size=q.shape) for _ in range(n)]
+    def perturb(self, q, idx, eps, n=3):
+        """Generate n random perturbations around q, only at indices in idx, within ±eps."""
+        q = np.asarray(q)
+        perturbations = []
+        for _ in range(n):
+            delta = np.zeros_like(q)
+            delta[idx] = np.random.uniform(-eps, eps, size=len(idx))
+            perturbations.append(q + delta)
+        return perturbations
+    
+    def weighted_joint_distance(self, q1, q2, weights):
+        diff = q2 - q1
+        return np.sqrt(np.sum(weights * diff**2))
+    
+    def create_graph(self, q_initsol, homepose, targetpoints, weights,idx,eps=0.05,n=3):
+        # Initialize the graph
+        G = nx.Graph()
+
+        # Build first layer with home configuration
+        G.add_node("L0_0", q=homepose, layer=0)
+
+        # Create Layer nodes: original + 3 perturbations for first layer
+        current_layer_nodes = []
+        current_layer_nodes.append(("L1_0", q_initsol))
+        perturbed_qs = self.perturb(q_initsol,idx,eps)
+
+        # Add perturbed nodes to the first layer
+        for i, q in enumerate(perturbed_qs, start=1):
+            current_layer_nodes.append((f"L1_{i}", q))
+
+        # Add layer 1 nodes to graph
+        for node_name, q in current_layer_nodes:
+            G.add_node(node_name, q=q, layer=1)
+
+        # Connect home node to all Layer 1 nodes
+        for node_name, q in current_layer_nodes:
+            G.add_edge("L0_0", node_name)
+            q1 = G.nodes["L0_0"]["q"]
+            q2 = G.nodes[node_name]["q"]
+            cost = self.weighted_joint_distance(q1, q2, weights)
+            G["L0_0"][node_name]["weight"] = cost
+
+        print("Layer 1 nodes added")
+            
+        # start building the rest of the layers starting from layer 2, outer loop over target points
+        for layer_idx, target_point in enumerate(targetpoints[1:], start=2):
+            print(f"Building layer {layer_idx}")
+            # For each layer, we will create a new set of nodes based on the previous layer's nodes    
+            next_layer_nodes = []
+            
+            # Iterate through the current layer nodes
+            for parent_i, (parent_name, parent_q) in enumerate(current_layer_nodes):
+                # Build target tf
+                T = self.build_target_frame(target_point)
+                # Solve IK for target pose with BFGS
+                q_sol,p_target,R_target = self.solve_ik_bfgs(T,parent_q)
+                
+                # Check if the solution is valid
+                if not q_sol.success:
+                    print(f"⚠️ BFGS did not converge for {parent_name}: {q_sol.message}")
+                    continue
+                q_sol = q_sol.x
+                print(f"  ✅ IK solution found for initial guess node {parent_name}")
+                
+                # Add the new node to the layer
+                node_name = f"L{layer_idx}_{parent_i}"
+                G.add_node(node_name, q=q_sol, layer=layer_idx)
+                next_layer_nodes.append((node_name, q_sol))
+
+            # Fully connect previous layer to this new layer, and calculate the edge cost
+            for parent_name, _ in current_layer_nodes:
+                q1 = G.nodes[parent_name]["q"]
+                for child_name, _ in next_layer_nodes:
+                    q2 = G.nodes[child_name]["q"]
+                    G.add_edge(parent_name, child_name)
+                    cost = self.weighted_joint_distance(q1, q2, weights)
+                    G[parent_name][child_name]["weight"] = cost
+
+            print(f"Layer {layer_idx} nodes added")
+            current_layer_nodes = next_layer_nodes
+            
+        return G
+
+    def layered_layout_truncated(self, G, max_layers_shown=8):
+        pos = {}
+        layers = {}
+
+        # Group nodes by layer
+        for node, data in G.nodes(data=True):
+            layer = data.get("layer", 0)
+            if layer not in layers:
+                layers[layer] = []
+            layers[layer].append(node)
+
+        sorted_layers = sorted(layers.items())
+        total_layers = len(sorted_layers)
+
+        # Decide which layers to keep
+        if total_layers > max_layers_shown:
+            keep_first = 4
+            keep_last = 4
+            visible_layers = (
+                sorted_layers[:keep_first] +
+                [("...", ["..."])] +  # placeholder node for skipped layers
+                sorted_layers[-keep_last:]
+            )
+        else:
+            visible_layers = sorted_layers
+
+        # Assign positions
+        for x, (layer_idx, nodes) in enumerate(visible_layers):
+            for y, node in enumerate(nodes):
+                pos[node] = (x, -y)
+
+        return pos
+    
+    
+    def get_shortest_path(self, G, source="L0_0"):
+        last_layer_idx = max(data["layer"] for _, data in G.nodes(data=True))
+        last_layer_nodes = [n for n, d in G.nodes(data=True) if d["layer"] == last_layer_idx]
+
+        best_path = None
+        best_cost = float("inf")
+
+        for target in last_layer_nodes:
+            try:
+                cost = nx.dijkstra_path_length(G, source, target=target, weight="weight")
+                if cost < best_cost:
+                    best_cost = cost
+                    best_path = nx.dijkstra_path(G, source, target=target, weight="weight")
+            except nx.NetworkXNoPath:
+                continue
+
+        print("Best path:", best_path)
+        print("Best cost:", best_cost)
+
+        if best_path is None:
+            return [], float("inf")
+
+        # Extract joint state vectors from the best path
+        joint_path = [G.nodes[node]["q"][1:7] for node in best_path]
+
+        return joint_path, best_cost
 
     def getParameterNode(self):
         return RobotCavityScanParameterNode(super().getParameterNode())
