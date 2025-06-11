@@ -414,30 +414,28 @@ class RobotCavityScanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
             # Find shortest path
             best_path, best_cost = self.logic.get_shortest_path(G)
-            
-            slicer.util.infoDisplay("Best path cost: {:.2f}".format(best_cost))
-
+    
             # Convert list to numpy array
             best_path = np.array(best_path)
             
             # Save values to logic attributes for later use
             self.bestpath = best_path
             self.bestcost = best_cost
-    
-            # Flatten the best path to a 1D array
-            flat_data = best_path.flatten()
-
-            # Create blank message and set values
-            msg = self.pub.GetBlankMessage()
-            msg.SetNumberOfTuples(len(flat_data))
-            for i, val in enumerate(flat_data):
-                msg.SetValue(i, val)
-
-            self.pub.Publish(msg)
+            slicer.util.infoDisplay("Best path cost: {:.2f}".format(best_cost))
 
         
     def onPlanButton(self) -> None:
-        slicer.util.infoDisplay("Robot execution logic is not implemented yet.")
+        # Flatten the best path to a 1D array
+        flat_data = self.bestpath.flatten()
+
+        # Create blank message and set values
+        msg = self.pub.GetBlankMessage()
+        msg.SetNumberOfTuples(len(flat_data))
+        for i, val in enumerate(flat_data):
+            msg.SetValue(i, val)
+
+        self.pub.Publish(msg)
+        slicer.util.infoDisplay("Plan sent to MoveIt")
 
     def onExecuteButton(self) -> None:
         slicer.util.infoDisplay("Robot execution logic is not implemented yet.")
